@@ -1,128 +1,200 @@
 const express = require("express");
 const cors = require("cors");
-const { randomUUID } = require("crypto");
+const mongoose = require("mongoose");
 require("dotenv").config();
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-const payments = [];
+// Conexão com MongoDB
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => {
+    console.log("MongoDB conectado com sucesso!");
+  })
+  .catch((error) => {
+    console.error("Erro ao conectar ao MongoDB:", error.message);
+  });
 
-// Simula o processamento assíncrono do pagamento
+// Modelo de pagamento
+const paymentSchema = new mongoose.Schema({
+  customer: {
+    type: String,
+    required: true,
+  },
+  amount: {
+    type: Number,
+    required: true,
+  },
+  method: {
+    type: String,
+    required: true,
+  },
+  status: {
+    type: String,
+    default: "pending",
+  },
+  message: {
+    type: String,
+    default: "Pagamento recebido e aguardando processamento.",
+  },
+  processedAt: {
+    type: Date,
+    default: null,
+  },
+  refundedAt: {
+    type: Date,
+    default: null,
+  },
+}, {
+  timestamps: true,
+});
+
+const Payment = mongoose.model("Payment", paymentSchema);
+
+// Processamento assíncrono
 function processPayment(paymentId) {
-  setTimeout(() => {
-    const payment = payments.find((item) => item.id === paymentId);
+  setTimeout(async () => {
+    try {
+      const payment = await Payment.findById(paymentId);
 
-    if (!payment || payment.status !== "pending") {
-      return;
+      if (!payment || payment.status !== "pending") {
+        return;
+      }
+
+      const approved = Math.random() >= 0.3;
+
+      payment.status = approved ? "approved" : "rejected";
+      payment.processedAt = new Date();
+      payment.message = approved
+        ? "Pagamento aprovado com sucesso."
+        : "Pagamento rejeitado pela operadora.";
+
+      await payment.save();
+    } catch (error) {
+      console.error("Erro ao processar pagamento:", error.message);
     }
-
-    const approved = Math.random() >= 0.3;
-
-    payment.status = approved ? "approved" : "rejected";
-    payment.processedAt = new Date().toISOString();
-    payment.message = approved
-      ? "Pagamento aprovado com sucesso."
-      : "Pagamento rejeitado pela operadora.";
   }, 5000);
 }
 
+// Rota inicial
 app.get("/", (req, res) => {
   res.json({
-    message: "PayFlow API - Sistema de pagamentos e processamento assíncrono",
+    message:
+      "PayFlow API - Sistema de pagamentos e processamento assíncrono",
     routes: {
       createPayment: "POST /payments",
       listPayments: "GET /payments",
       getPaymentById: "GET /payments/:id",
-      refundPayment: "POST /payments/:id/refund"
+      refundPayment: "POST /payments/:id/refund",
+    },
+  });
+});
+
+// Criar pagamento
+app.post("/payments", async (req, res) => {
+  try {
+    const { customer, amount, method } = req.body;
+
+    if (!customer || !amount || !method) {
+      return res.status(400).json({
+        error: "Os campos customer, amount e method são obrigatórios.",
+      });
     }
-  });
-});
 
-app.post("/payments", (req, res) => {
-  const { customer, amount, method } = req.body;
+    if (amount <= 0) {
+      return res.status(400).json({
+        error: "O valor do pagamento precisa ser maior que zero.",
+      });
+    }
 
-  if (!customer || !amount || !method) {
-    return res.status(400).json({
-      error: "Os campos customer, amount e method são obrigatórios."
+    const payment = await Payment.create({
+      customer,
+      amount,
+      method,
+    });
+
+    processPayment(payment._id);
+
+    return res.status(202).json({
+      message:
+        "Pagamento criado. O processamento será feito em segundo plano.",
+      payment,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Erro ao criar pagamento.",
     });
   }
-
-  if (amount <= 0) {
-    return res.status(400).json({
-      error: "O valor do pagamento precisa ser maior que zero."
-    });
-  }
-
-  const payment = {
-    id: randomUUID(),
-    customer,
-    amount,
-    method,
-    status: "pending",
-    message: "Pagamento recebido e aguardando processamento.",
-    createdAt: new Date().toISOString(),
-    processedAt: null
-  };
-
-  payments.push(payment);
-
-  processPayment(payment.id);
-
-  return res.status(202).json({
-    message: "Pagamento criado. O processamento será feito em segundo plano.",
-    payment
-  });
 });
 
-app.get("/payments", (req, res) => {
-  res.json(payments);
-});
-
-app.get("/payments/:id", (req, res) => {
-  const { id } = req.params;
-
-  const payment = payments.find((item) => item.id === id);
-
-  if (!payment) {
-    return res.status(404).json({
-      error: "Pagamento não encontrado."
+// Listar pagamentos
+app.get("/payments", async (req, res) => {
+  try {
+    const payments = await Payment.find().sort({ createdAt: -1 });
+    res.json(payments);
+  } catch (error) {
+    res.status(500).json({
+      error: "Erro ao buscar pagamentos.",
     });
   }
-
-  res.json(payment);
 });
 
-app.post("/payments/:id/refund", (req, res) => {
-  const { id } = req.params;
+// Buscar pagamento pelo ID
+app.get("/payments/:id", async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
 
-  const payment = payments.find((item) => item.id === id);
+    if (!payment) {
+      return res.status(404).json({
+        error: "Pagamento não encontrado.",
+      });
+    }
 
-  if (!payment) {
-    return res.status(404).json({
-      error: "Pagamento não encontrado."
+    res.json(payment);
+  } catch (error) {
+    res.status(400).json({
+      error: "ID de pagamento inválido.",
     });
   }
-
-  if (payment.status !== "approved") {
-    return res.status(400).json({
-      error: "Só é possível estornar pagamentos aprovados."
-    });
-  }
-
-  payment.status = "refunded";
-  payment.message = "Pagamento estornado com sucesso.";
-  payment.refundedAt = new Date().toISOString();
-
-  res.json({
-    message: "Estorno realizado com sucesso.",
-    payment
-  });
 });
 
-const PORT = process.env.PORT || 3000;
+// Estornar pagamento
+app.post("/payments/:id/refund", async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
+
+    if (!payment) {
+      return res.status(404).json({
+        error: "Pagamento não encontrado.",
+      });
+    }
+
+    if (payment.status !== "approved") {
+      return res.status(400).json({
+        error: "Só é possível estornar pagamentos aprovados.",
+      });
+    }
+
+    payment.status = "refunded";
+    payment.message = "Pagamento estornado com sucesso.";
+    payment.refundedAt = new Date();
+
+    await payment.save();
+
+    res.json({
+      message: "Estorno realizado com sucesso.",
+      payment,
+    });
+  } catch (error) {
+    res.status(400).json({
+      error: "ID de pagamento inválido.",
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`PayFlow API rodando na porta ${PORT}`);
